@@ -698,8 +698,9 @@ void CTCPServer::CTCPClient::Send(const char *data, unsigned int size)
 
   {
     std::unique_lock<std::mutex> lock(m_outputMutex);
-    // A single message of any size is accepted, so a large response is never refused
-    if (!m_output.empty() && m_outputBytes + size > maxQueuedOutput)
+    // Bound even the first response, and avoid overflow in the queue accounting.
+    // Oversized responses must not exhaust memory just because the queue was empty.
+    if (size > maxQueuedOutput || m_outputBytes > maxQueuedOutput - size)
     {
       if (!m_closing)
         CLog::Log(LOGERROR, "JSONRPC Server: Peer is not reading, dropping it with {} bytes unsent",

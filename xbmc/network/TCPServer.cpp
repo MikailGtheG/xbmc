@@ -958,9 +958,9 @@ void CTCPServer::WaitForWorkers()
 
 void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, int length)
 {
-  bool inObject = false;
-  bool inString = false;
-  bool escapeNext = false;
+  bool inObject = m_beginBrackets > m_endBrackets;
+  bool inString = m_inString;
+  bool escapeNext = m_escapeNext;
 
   for (int i = 0; i < length; i++)
   {
@@ -1038,9 +1038,14 @@ void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, in
         Drain();
         m_beginChar = m_beginBrackets = m_endBrackets = 0;
         m_buffer.clear();
+        inObject = false;
+        inString = false;
+        escapeNext = false;
       }
     }
   }
+  m_inString = inString;
+  m_escapeNext = escapeNext;
 }
 
 void CTCPServer::CTCPClient::Disconnect()
@@ -1070,6 +1075,8 @@ void CTCPServer::CTCPClient::Copy(const CTCPClient& client)
   m_endBrackets       = client.m_endBrackets;
   m_beginChar         = client.m_beginChar;
   m_endChar           = client.m_endChar;
+  m_inString          = client.m_inString;
+  m_escapeNext        = client.m_escapeNext;
   m_buffer            = client.m_buffer;
 }
 

@@ -363,6 +363,24 @@ protected:
     client->Send(oversized.data(), static_cast<unsigned int>(oversized.size()));
   }
 
+  void PushUnterminatedRequest(size_t length)
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::shared_ptr<CTCPServer::CTCPClient> client;
+    {
+      std::unique_lock lock(server->m_connectionsCritSection);
+      if (server->m_connections.empty())
+      {
+        ADD_FAILURE() << "server did not accept a client";
+        return;
+      }
+      client = server->m_connections.front();
+    }
+    std::string request(length, 'x');
+    request[0] = '{'; // Start a JSON object without ever closing it.
+    client->PushBuffer(server.get(), request.data(), static_cast<int>(request.size()));
+  }
+
   int m_port{0};
   std::vector<SOCKET> m_clients;
   std::unique_ptr<CTestMethods> m_methods;
@@ -392,6 +410,29 @@ TEST_F(TestTCPServer, ExcessConnectionsDoNotExhaustServer)
   EXPECT_TRUE(Exchange(m_clients.front(),
                        R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
       << "existing control clients must continue to receive responses at capacity";
+}
+
+TEST_F(TestTCPServer, IncompleteJsonCannotGrowWithoutBound)
+{
+  const SOCKET stalled = Connect();
+  ASSERT_NE(INVALID_SOCKET, stalled);
+  const auto readyDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() == 0 && std::chrono::steady_clock::now() < readyDeadline)
+    std::this_thread::sleep_for(5ms);
+  ASSERT_EQ(1u, AcceptedClients());
+
+  // Directly feed parser in this fixture; do not depend on OS TCP send-buffer capacity.
+  PushUnterminatedRequest(4 * 1024 * 1024 + 1);
+
+  const auto closedDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() != 0 && std::chrono::steady_clock::now() < closedDeadline)
+    std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(0u, AcceptedClients()) << "oversized incomplete JSON should disconnect";
+
+  const SOCKET healthy = Connect();
+  ASSERT_NE(INVALID_SOCKET, healthy);
+  EXPECT_TRUE(Exchange(healthy, R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "server should still handle requests after rejecting malformed input";
 }
 
 TEST_F(TestTCPServer, AFirstOversizedResponseDoesNotExhaustMemory)

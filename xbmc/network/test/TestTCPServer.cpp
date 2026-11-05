@@ -338,6 +338,14 @@ protected:
     return false;
   }
 
+  // Access private connection state through the fixture, which CTCPServer friends.
+  size_t AcceptedClients()
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::unique_lock lock(server->m_connectionsCritSection);
+    return server->m_connections.size();
+  }
+
   int m_port{0};
   std::vector<SOCKET> m_clients;
   std::unique_ptr<CTestMethods> m_methods;
@@ -346,6 +354,28 @@ protected:
   CFloodAnnouncer m_progress;
 };
 } // namespace JSONRPC
+
+TEST_F(TestTCPServer, ExcessConnectionsDoNotExhaustServer)
+{
+  // A slow or malicious control client must not create unlimited Kodi workers/socket state.
+  constexpr size_t maxConnections = 32;
+  for (size_t n = 1; n <= maxConnections; ++n)
+  {
+    ASSERT_NE(INVALID_SOCKET, Connect());
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (AcceptedClients() < n && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(n, AcceptedClients());
+  }
+
+  // The TCP handshake may succeed, but the server must close rather than register the peer.
+  ASSERT_NE(INVALID_SOCKET, Connect());
+  std::this_thread::sleep_for(150ms);
+  EXPECT_EQ(maxConnections, AcceptedClients());
+  EXPECT_TRUE(Exchange(m_clients.front(),
+                       R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "existing control clients must continue to receive responses at capacity";
+}
 
 TEST_F(TestTCPServer, AnIdleConnectionHoldsNoWorker)
 {

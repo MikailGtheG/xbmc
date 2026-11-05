@@ -476,6 +476,45 @@ TEST_F(TestTCPServer, AnIdleConnectionHoldsNoWorker)
   EXPECT_TRUE(WaitForNoWorkers()) << CTCPServer::GetActiveWorkers() << " workers still running";
 }
 
+TEST_F(TestTCPServer, JsonStringAcrossRecvBuffersDoesNotPrematurelyCloseRequest)
+{
+  const SOCKET client = Connect();
+  ASSERT_NE(INVALID_SOCKET, client);
+
+  // The '}' at the start of the second chunk is part of a JSON string,
+  // not the end of the request. Resetting inString on each recv() causes
+  // a premature and invalid JSON-RPC dispatch.
+  const std::string first =
+      "{\"jsonrpc\":\"2.0\",\"method\":\"JSONRPC.Ping\",\"id\":1,\"extra\":\"text ";
+  const std::string second = "} inside string\"}";
+  ASSERT_EQ(static_cast<int>(first.size()),
+            send(client, first.data(), static_cast<int>(first.size()), 0));
+  // The server must process the first chunk before the next one arrives.
+  std::this_thread::sleep_for(200ms);
+  ASSERT_EQ(static_cast<int>(second.size()),
+            send(client, second.data(), static_cast<int>(second.size()), 0));
+  EXPECT_TRUE(ReadReply(client)) << "fragmented JSON inside string was rejected";
+}
+
+TEST_F(TestTCPServer, JsonEscapeAcrossRecvBuffersIsPreserved)
+{
+  const SOCKET client = Connect();
+  ASSERT_NE(INVALID_SOCKET, client);
+  const std::string first =
+      "{\"jsonrpc\":\"2.0\",\"method\":\"JSONRPC.Ping\",\"id\":1,\"extra\":\"escaped ";
+  const std::string escape = "\\";
+  const std::string last = "\" } still text\"}";
+  ASSERT_EQ(static_cast<int>(first.size()),
+            send(client, first.data(), static_cast<int>(first.size()), 0));
+  std::this_thread::sleep_for(100ms);
+  ASSERT_EQ(static_cast<int>(escape.size()),
+            send(client, escape.data(), static_cast<int>(escape.size()), 0));
+  std::this_thread::sleep_for(100ms);
+  ASSERT_EQ(static_cast<int>(last.size()),
+            send(client, last.data(), static_cast<int>(last.size()), 0));
+  EXPECT_TRUE(ReadReply(client)) << "JSON escape spanning TCP buffers was lost";
+}
+
 TEST_F(TestTCPServer, AnIncompleteRequestHoldsNoWorker)
 {
   const SOCKET client = Connect();

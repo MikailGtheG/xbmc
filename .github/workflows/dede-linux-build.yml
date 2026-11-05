@@ -1,0 +1,49 @@
+name: Kodi Linux compile and regression gate
+on:
+  push:
+    branches: [dede/stability-bounded-jsonrpc-clients]
+    paths:
+      - 'xbmc/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/dede-linux-build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kodi-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Kodi build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          printf 'Types: deb-src\nURIs: http://deb.debian.org/debian\nSuites: trixie\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' > /etc/apt/sources.list.d/dede-src.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config python3-dev swig bison curl
+          apt-get build-dep -y kodi
+      - name: Configure Kodi (Linux X11)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-dede -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCORE_PLATFORM_NAME=x11 \
+            -DAPP_RENDER_SYSTEM=gl
+      - name: Compile Kodi and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-dede --parallel 2
+          cmake --build build-dede --target kodi-test --parallel 2
+      - name: Run Kodi C++ regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build-dede/kodi-test
+          timeout 600s build-dede/kodi-test --gtest_brief=1

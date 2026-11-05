@@ -24,7 +24,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           printf 'Types: deb-src\nURIs: http://deb.debian.org/debian\nSuites: trixie\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n' > /etc/apt/sources.list.d/dede-src.sources
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config python3-dev swig bison curl
+          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config python3-dev swig bison curl meson
           apt-get build-dep -y kodi
       - name: Configure Kodi (Linux X11)
         shell: bash

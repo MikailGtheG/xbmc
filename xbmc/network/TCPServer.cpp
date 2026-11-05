@@ -70,6 +70,10 @@ namespace
 {
 constexpr size_t maxBufferLength = 64 * 1024;
 
+// Prevent connection floods from consuming unlimited sockets, per-client state, and worker threads.
+// Dede TV normally needs one local JSON-RPC connection; the cap leaves room for normal Kodi use.
+constexpr size_t maxConcurrentClients = 32;
+
 // Output queued for a peer that has stopped reading, beyond which it is dropped
 constexpr size_t maxQueuedOutput = 16 * 1024 * 1024;
 
@@ -324,6 +328,20 @@ void CTCPServer::Process()
           }
           else
           {
+            // select()/FD_SET cannot safely represent arbitrarily many descriptors.
+            // Refuse excess connections *before* registering them or starting workers.
+            // Windows fd_set has a fixed capacity (rather than POSIX descriptor indexing).
+            bool cannotMonitor = m_connections.size() >= maxConcurrentClients;
+#if !defined(TARGET_WINDOWS)
+            cannotMonitor = cannotMonitor ||
+                            static_cast<size_t>(newconnection->m_socket) >= FD_SETSIZE;
+#endif
+            if (cannotMonitor)
+            {
+              closesocket(newconnection->m_socket);
+              continue;
+            }
+
             CLog::Log(LOGINFO, "JSONRPC Server: New connection added");
             if (!SetNonBlocking(newconnection->m_socket))
               CLog::Log(LOGWARNING, "JSONRPC Server: Could not make the connection non-blocking");

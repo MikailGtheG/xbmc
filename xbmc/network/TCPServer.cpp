@@ -74,6 +74,9 @@ constexpr size_t maxBufferLength = 64 * 1024;
 // Dede TV normally needs one local JSON-RPC connection; the cap leaves room for normal Kodi use.
 constexpr size_t maxConcurrentClients = 32;
 
+// A deliberately incomplete JSON request must not grow per-client memory indefinitely.
+constexpr size_t maxRequestLength = 4 * 1024 * 1024;
+
 // Output queued for a peer that has stopped reading, beyond which it is dropped
 constexpr size_t maxQueuedOutput = 16 * 1024 * 1024;
 
@@ -976,6 +979,15 @@ void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, in
 
     if (m_beginChar != 0)
     {
+      if (m_buffer.size() >= maxRequestLength)
+      {
+        CLog::Log(LOGWARNING,
+                  "JSONRPC Server: Request exceeds {} bytes, dropping connection",
+                  maxRequestLength);
+        m_buffer.clear();
+        RequestClose();
+        return;
+      }
       m_buffer.push_back(c);
       if (inObject)
       {

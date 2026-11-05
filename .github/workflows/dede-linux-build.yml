@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-dede -G Ninja \
+          cmake -S . -B build-dede -G "Unix Makefiles" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCORE_PLATFORM_NAME=x11 \

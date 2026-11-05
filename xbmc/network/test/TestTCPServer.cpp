@@ -346,6 +346,23 @@ protected:
     return server->m_connections.size();
   }
 
+  void SendOversizedOutput()
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::shared_ptr<CTCPServer::CTCPClient> client;
+    {
+      std::unique_lock lock(server->m_connectionsCritSection);
+      if (server->m_connections.empty())
+      {
+        ADD_FAILURE() << "server did not accept a client";
+        return;
+      }
+      client = server->m_connections.front();
+    }
+    const std::string oversized(16 * 1024 * 1024 + 1, 'x');
+    client->Send(oversized.data(), static_cast<unsigned int>(oversized.size()));
+  }
+
   int m_port{0};
   std::vector<SOCKET> m_clients;
   std::unique_ptr<CTestMethods> m_methods;
@@ -375,6 +392,29 @@ TEST_F(TestTCPServer, ExcessConnectionsDoNotExhaustServer)
   EXPECT_TRUE(Exchange(m_clients.front(),
                        R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
       << "existing control clients must continue to receive responses at capacity";
+}
+
+TEST_F(TestTCPServer, AFirstOversizedResponseDoesNotExhaustMemory)
+{
+  const SOCKET original = Connect();
+  ASSERT_NE(INVALID_SOCKET, original);
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(5ms);
+  ASSERT_EQ(1u, AcceptedClients());
+
+  // Before the fix an empty output queue accepted this >16 MiB response in full.
+  SendOversizedOutput();
+
+  const auto closeDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() != 0 && std::chrono::steady_clock::now() < closeDeadline)
+    std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(0u, AcceptedClients()) << "oversized response should drop the client";
+
+  const SOCKET next = Connect();
+  ASSERT_NE(INVALID_SOCKET, next);
+  EXPECT_TRUE(Exchange(next, R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "server must stay healthy after rejecting an oversized response";
 }
 
 TEST_F(TestTCPServer, AnIdleConnectionHoldsNoWorker)

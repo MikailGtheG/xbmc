@@ -7,6 +7,12 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - '.github/workflows/dede-linux-build.yml'
+  pull_request:
+    paths:
+      - 'xbmc/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/dede-linux-build.yml'
   workflow_dispatch:
 permissions:
   contents: read

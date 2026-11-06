@@ -50,6 +50,29 @@ jobs:
           set -euo pipefail
           test -x build-dede/kodi-test
           timeout 600s build-dede/kodi-test --gtest_brief=1 --gtest_output=xml:build-dede/kodi-test-results.xml
+      - name: Diagnose HDR mastering-peak regression
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x build-dede/kodi-test ]; then
+            echo "Kodi test binary unavailable; HDR diagnosis skipped"
+            exit 0
+          fi
+          # A separate report keeps the known HDR regression observable even
+          # when the full suite exits nonzero. Never hide the full-suite failure.
+          timeout 120s build-dede/kodi-test \\
+            --gtest_filter=TestCaptureConvert.PQRampHonorsMasteringPeak \\
+            --gtest_repeat=3 \\
+            --gtest_output=xml:build-dede/kodi-hdr-diagnostic.xml
+      - name: Preserve HDR diagnostic results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kodi-hdr-diagnostic
+          path: build-dede/kodi-hdr-diagnostic.xml
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Preserve Kodi regression results
         if: always()
         uses: actions/upload-artifact@v4

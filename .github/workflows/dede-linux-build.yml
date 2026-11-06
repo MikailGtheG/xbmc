@@ -67,10 +67,20 @@ jobs:
           fi
           # A separate report keeps the known HDR regression observable even
           # when the full suite exits nonzero. Never hide the full-suite failure.
+          # Diagnostic failures are expected while the full-suite regression is open.
+          # Keep the main test gate red, but distinguish a failing assertion from
+          # a broken/timeout diagnostic invocation.
+          status=0
           timeout 120s build-dede/kodi-test \
             --gtest_filter=TestCaptureConvert.PQRampHonorsMasteringPeak \
             --gtest_repeat=3 \
-            --gtest_output=xml:build-dede/kodi-hdr-diagnostic.xml
+            --gtest_output=xml:build-dede/kodi-hdr-diagnostic.xml || status=$?
+          if [ "$status" -eq 1 ]; then
+            echo "::warning::HDR mastering-peak regression reproduced; main test gate remains failed"
+          elif [ "$status" -ne 0 ]; then
+            echo "::error::HDR diagnostic execution failed with status $status"
+            exit "$status"
+          fi
       - name: Preserve HDR diagnostic results
         if: always()
         uses: actions/upload-artifact@v4

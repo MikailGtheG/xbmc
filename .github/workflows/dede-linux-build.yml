@@ -49,4 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           test -x build-dede/kodi-test
-          timeout 600s build-dede/kodi-test --gtest_brief=1
+          timeout 600s build-dede/kodi-test --gtest_brief=1 --gtest_output=xml:build-dede/kodi-test-results.xml
+      - name: Preserve Kodi regression results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kodi-regression-results
+          path: build-dede/kodi-test-results.xml
+          if-no-files-found: warn
+          retention-days: 14

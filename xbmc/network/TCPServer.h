@@ -168,6 +168,9 @@ namespace JSONRPC
       int m_announcementflags;
       int m_beginBrackets, m_endBrackets;
       char m_beginChar, m_endChar;
+      // A JSON string and its escape may span multiple recv() buffers.
+      bool m_inString{false};
+      bool m_escapeNext{false};
       std::string m_buffer;
 
       std::atomic<bool> m_closing{false};

@@ -121,6 +121,13 @@ TEST(TestCaptureConvert, CopyBGRA8IgnoresHDRTagsNoTonemap)
 
 TEST(TestCaptureConvert, PQRampHonorsMasteringPeak)
 {
+#if LIBSWSCALE_BUILD < AV_VERSION_INT(9, 0, 100)
+  // The legacy swscale API cannot ingest mastering-display side data or
+  // perform the metadata-aware tonemapping this assertion is testing.
+  // Keep this test active on CMS-capable builds; do not treat the legacy
+  // raw-conversion fallback as evidence of HDR mastering-peak support.
+  GTEST_SKIP() << "HDR mastering-peak conversion requires libswscale CMS (>= 9.0.100)";
+#endif
   // one row per luminance step, gray PQ-coded RGBA64 tagged BT.2020 + PQ
   const std::vector<double> nits = {0.0, 1.0, 10.0, 50.0, 100.0, 203.0, 400.0, 1000.0, 10000.0};
   const unsigned int width = 4;

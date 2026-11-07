@@ -227,7 +227,9 @@ std::string CJSONRPC::MethodCall(const std::string &inputString, ITransportLayer
   CVariant inputroot, outputroot, result;
   bool hasResponse = false;
 
-  CLog::Log(LOGDEBUG, LOGJSONRPC, "JSONRPC: Incoming request: {}", inputString);
+  // JSON-RPC payloads can contain credentials, URLs and private media paths.
+  // Avoid copying them into logs on every remote-control interaction.
+  CLog::Log(LOGDEBUG, LOGJSONRPC, "JSONRPC: Incoming request ({} bytes)", inputString.size());
 
   if (CJSONVariantParser::Parse(inputString, inputroot) && !inputroot.isNull())
   {
@@ -258,7 +260,7 @@ std::string CJSONRPC::MethodCall(const std::string &inputString, ITransportLayer
   }
   else
   {
-    CLog::Log(LOGERROR, "JSONRPC: Failed to parse '{}'", inputString);
+    CLog::Log(LOGERROR, "JSONRPC: Failed to parse request ({} bytes)", inputString.size());
     BuildResponse(inputroot, ParseError, CVariant(), outputroot);
     hasResponse = true;
   }
@@ -293,10 +295,8 @@ bool CJSONRPC::HandleMethodCall(const CVariant& request, CVariant& response, ITr
   }
   else
   {
-    std::string str;
-    CJSONVariantWriter::Write(request, str, true);
-
-    CLog::Log(LOGERROR, "JSONRPC: Failed to parse '{}'", str);
+    // Do not serialize malformed or unauthorized requests into security logs.
+    CLog::Log(LOGERROR, "JSONRPC: Invalid JSON-RPC request envelope");
     errorCode = InvalidRequest;
   }
 

@@ -338,6 +338,49 @@ protected:
     return false;
   }
 
+  // Access private connection state through the fixture, which CTCPServer friends.
+  size_t AcceptedClients()
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::unique_lock lock(server->m_connectionsCritSection);
+    return server->m_connections.size();
+  }
+
+  void SendOversizedOutput()
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::shared_ptr<CTCPServer::CTCPClient> client;
+    {
+      std::unique_lock lock(server->m_connectionsCritSection);
+      if (server->m_connections.empty())
+      {
+        ADD_FAILURE() << "server did not accept a client";
+        return;
+      }
+      client = server->m_connections.front();
+    }
+    const std::string oversized(16 * 1024 * 1024 + 1, 'x');
+    client->Send(oversized.data(), static_cast<unsigned int>(oversized.size()));
+  }
+
+  void PushUnterminatedRequest(size_t length)
+  {
+    auto server = CTCPServer::ServerInstance;
+    std::shared_ptr<CTCPServer::CTCPClient> client;
+    {
+      std::unique_lock lock(server->m_connectionsCritSection);
+      if (server->m_connections.empty())
+      {
+        ADD_FAILURE() << "server did not accept a client";
+        return;
+      }
+      client = server->m_connections.front();
+    }
+    std::string request(length, 'x');
+    request[0] = '{'; // Start a JSON object without ever closing it.
+    client->PushBuffer(server.get(), request.data(), static_cast<int>(request.size()));
+  }
+
   int m_port{0};
   std::vector<SOCKET> m_clients;
   std::unique_ptr<CTestMethods> m_methods;
@@ -346,6 +389,74 @@ protected:
   CFloodAnnouncer m_progress;
 };
 } // namespace JSONRPC
+
+TEST_F(TestTCPServer, ExcessConnectionsDoNotExhaustServer)
+{
+  // A slow or malicious control client must not create unlimited Kodi workers/socket state.
+  constexpr size_t maxConnections = 32;
+  for (size_t n = 1; n <= maxConnections; ++n)
+  {
+    ASSERT_NE(INVALID_SOCKET, Connect());
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (AcceptedClients() < n && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(n, AcceptedClients());
+  }
+
+  // The TCP handshake may succeed, but the server must close rather than register the peer.
+  ASSERT_NE(INVALID_SOCKET, Connect());
+  std::this_thread::sleep_for(150ms);
+  EXPECT_EQ(maxConnections, AcceptedClients());
+  EXPECT_TRUE(Exchange(m_clients.front(),
+                       R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "existing control clients must continue to receive responses at capacity";
+}
+
+TEST_F(TestTCPServer, IncompleteJsonCannotGrowWithoutBound)
+{
+  const SOCKET stalled = Connect();
+  ASSERT_NE(INVALID_SOCKET, stalled);
+  const auto readyDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() == 0 && std::chrono::steady_clock::now() < readyDeadline)
+    std::this_thread::sleep_for(5ms);
+  ASSERT_EQ(1u, AcceptedClients());
+
+  // Directly feed parser in this fixture; do not depend on OS TCP send-buffer capacity.
+  PushUnterminatedRequest(4 * 1024 * 1024 + 1);
+
+  const auto closedDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() != 0 && std::chrono::steady_clock::now() < closedDeadline)
+    std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(0u, AcceptedClients()) << "oversized incomplete JSON should disconnect";
+
+  const SOCKET healthy = Connect();
+  ASSERT_NE(INVALID_SOCKET, healthy);
+  EXPECT_TRUE(Exchange(healthy, R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "server should still handle requests after rejecting malformed input";
+}
+
+TEST_F(TestTCPServer, AFirstOversizedResponseDoesNotExhaustMemory)
+{
+  const SOCKET original = Connect();
+  ASSERT_NE(INVALID_SOCKET, original);
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(5ms);
+  ASSERT_EQ(1u, AcceptedClients());
+
+  // Before the fix an empty output queue accepted this >16 MiB response in full.
+  SendOversizedOutput();
+
+  const auto closeDeadline = std::chrono::steady_clock::now() + 2s;
+  while (AcceptedClients() != 0 && std::chrono::steady_clock::now() < closeDeadline)
+    std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(0u, AcceptedClients()) << "oversized response should drop the client";
+
+  const SOCKET next = Connect();
+  ASSERT_NE(INVALID_SOCKET, next);
+  EXPECT_TRUE(Exchange(next, R"({"jsonrpc":"2.0","method":"JSONRPC.Ping","id":1})"))
+      << "server must stay healthy after rejecting an oversized response";
+}
 
 TEST_F(TestTCPServer, AnIdleConnectionHoldsNoWorker)
 {
@@ -363,6 +474,45 @@ TEST_F(TestTCPServer, AnIdleConnectionHoldsNoWorker)
 
   // Every request has been answered and every connection is still open
   EXPECT_TRUE(WaitForNoWorkers()) << CTCPServer::GetActiveWorkers() << " workers still running";
+}
+
+TEST_F(TestTCPServer, JsonStringAcrossRecvBuffersDoesNotPrematurelyCloseRequest)
+{
+  const SOCKET client = Connect();
+  ASSERT_NE(INVALID_SOCKET, client);
+
+  // The '}' at the start of the second chunk is part of a JSON string,
+  // not the end of the request. Resetting inString on each recv() causes
+  // a premature and invalid JSON-RPC dispatch.
+  const std::string first =
+      "{\"jsonrpc\":\"2.0\",\"method\":\"JSONRPC.Ping\",\"id\":1,\"extra\":\"text ";
+  const std::string second = "} inside string\"}";
+  ASSERT_EQ(static_cast<int>(first.size()),
+            send(client, first.data(), static_cast<int>(first.size()), 0));
+  // The server must process the first chunk before the next one arrives.
+  std::this_thread::sleep_for(200ms);
+  ASSERT_EQ(static_cast<int>(second.size()),
+            send(client, second.data(), static_cast<int>(second.size()), 0));
+  EXPECT_TRUE(ReadReply(client)) << "fragmented JSON inside string was rejected";
+}
+
+TEST_F(TestTCPServer, JsonEscapeAcrossRecvBuffersIsPreserved)
+{
+  const SOCKET client = Connect();
+  ASSERT_NE(INVALID_SOCKET, client);
+  const std::string first =
+      "{\"jsonrpc\":\"2.0\",\"method\":\"JSONRPC.Ping\",\"id\":1,\"extra\":\"escaped ";
+  const std::string escape = "\\";
+  const std::string last = "\" } still text\"}";
+  ASSERT_EQ(static_cast<int>(first.size()),
+            send(client, first.data(), static_cast<int>(first.size()), 0));
+  std::this_thread::sleep_for(100ms);
+  ASSERT_EQ(static_cast<int>(escape.size()),
+            send(client, escape.data(), static_cast<int>(escape.size()), 0));
+  std::this_thread::sleep_for(100ms);
+  ASSERT_EQ(static_cast<int>(last.size()),
+            send(client, last.data(), static_cast<int>(last.size()), 0));
+  EXPECT_TRUE(ReadReply(client)) << "JSON escape spanning TCP buffers was lost";
 }
 
 TEST_F(TestTCPServer, AnIncompleteRequestHoldsNoWorker)

@@ -70,6 +70,13 @@ namespace
 {
 constexpr size_t maxBufferLength = 64 * 1024;
 
+// Prevent connection floods from consuming unlimited sockets, per-client state, and worker threads.
+// Dede TV normally needs one local JSON-RPC connection; the cap leaves room for normal Kodi use.
+constexpr size_t maxConcurrentClients = 32;
+
+// A deliberately incomplete JSON request must not grow per-client memory indefinitely.
+constexpr size_t maxRequestLength = 4 * 1024 * 1024;
+
 // Output queued for a peer that has stopped reading, beyond which it is dropped
 constexpr size_t maxQueuedOutput = 16 * 1024 * 1024;
 
@@ -324,6 +331,20 @@ void CTCPServer::Process()
           }
           else
           {
+            // select()/FD_SET cannot safely represent arbitrarily many descriptors.
+            // Refuse excess connections *before* registering them or starting workers.
+            // Windows fd_set has a fixed capacity (rather than POSIX descriptor indexing).
+            bool cannotMonitor = m_connections.size() >= maxConcurrentClients;
+#if !defined(TARGET_WINDOWS)
+            cannotMonitor = cannotMonitor ||
+                            static_cast<size_t>(newconnection->m_socket) >= FD_SETSIZE;
+#endif
+            if (cannotMonitor)
+            {
+              closesocket(newconnection->m_socket);
+              continue;
+            }
+
             CLog::Log(LOGINFO, "JSONRPC Server: New connection added");
             if (!SetNonBlocking(newconnection->m_socket))
               CLog::Log(LOGWARNING, "JSONRPC Server: Could not make the connection non-blocking");
@@ -680,8 +701,9 @@ void CTCPServer::CTCPClient::Send(const char *data, unsigned int size)
 
   {
     std::unique_lock<std::mutex> lock(m_outputMutex);
-    // A single message of any size is accepted, so a large response is never refused
-    if (!m_output.empty() && m_outputBytes + size > maxQueuedOutput)
+    // Bound even the first response, and avoid overflow in the queue accounting.
+    // Oversized responses must not exhaust memory just because the queue was empty.
+    if (size > maxQueuedOutput || m_outputBytes > maxQueuedOutput - size)
     {
       if (!m_closing)
         CLog::Log(LOGERROR, "JSONRPC Server: Peer is not reading, dropping it with {} bytes unsent",
@@ -936,9 +958,9 @@ void CTCPServer::WaitForWorkers()
 
 void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, int length)
 {
-  bool inObject = false;
-  bool inString = false;
-  bool escapeNext = false;
+  bool inObject = m_beginBrackets > m_endBrackets;
+  bool inString = m_inString;
+  bool escapeNext = m_escapeNext;
 
   for (int i = 0; i < length; i++)
   {
@@ -957,6 +979,15 @@ void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, in
 
     if (m_beginChar != 0)
     {
+      if (m_buffer.size() >= maxRequestLength)
+      {
+        CLog::Log(LOGWARNING,
+                  "JSONRPC Server: Request exceeds {} bytes, dropping connection",
+                  maxRequestLength);
+        m_buffer.clear();
+        RequestClose();
+        return;
+      }
       m_buffer.push_back(c);
       if (inObject)
       {
@@ -1007,9 +1038,14 @@ void CTCPServer::CTCPClient::PushBuffer(CTCPServer* host, const char* buffer, in
         Drain();
         m_beginChar = m_beginBrackets = m_endBrackets = 0;
         m_buffer.clear();
+        inObject = false;
+        inString = false;
+        escapeNext = false;
       }
     }
   }
+  m_inString = inString;
+  m_escapeNext = escapeNext;
 }
 
 void CTCPServer::CTCPClient::Disconnect()
@@ -1039,6 +1075,8 @@ void CTCPServer::CTCPClient::Copy(const CTCPClient& client)
   m_endBrackets       = client.m_endBrackets;
   m_beginChar         = client.m_beginChar;
   m_endChar           = client.m_endChar;
+  m_inString          = client.m_inString;
+  m_escapeNext        = client.m_escapeNext;
   m_buffer            = client.m_buffer;
 }
 
